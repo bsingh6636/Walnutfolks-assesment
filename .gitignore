@@ -1,0 +1,11 @@
+# Secrets and local config
+.env
+.claude/settings.local.json
+
+# Python
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+*.pdf

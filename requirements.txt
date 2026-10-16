@@ -1,0 +1,8 @@
+# Runtime dependencies. Pinned so the deployed service installs exactly what was tested.
+fastapi==0.143.2
+uvicorn[standard]==0.54.0
+pydantic-settings==2.16.0
+aiomysql==0.3.2
+# PyMySQL (pulled in by aiomysql) needs cryptography for MySQL 8's default
+# caching_sha2_password authentication.
+cryptography==50.0.2
