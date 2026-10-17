@@ -27,6 +27,21 @@ class Settings(BaseSettings):
     # Lower it locally to iterate faster.
     processing_delay_seconds: float = 30.0
 
+    # --- background worker ---
+    # Run the worker inside the API process. Set to false when running it
+    # separately with `python -m app.worker`.
+    run_worker_in_api: bool = True
+    # How many transactions may be in their 30 second delay at the same time.
+    worker_concurrency: int = 10
+    # How long to wait before looking for work again when nothing was found.
+    worker_poll_interval_seconds: float = 1.0
+    # Give up and mark FAILED after this many attempts.
+    worker_max_attempts: int = 3
+    # Wait this long before retrying a failed attempt.
+    worker_retry_delay_seconds: int = 30
+    # A row claimed longer ago than this belongs to a worker that died; reclaim it.
+    worker_stale_claim_seconds: int = 300
+
 
 # One settings object, created when the app starts, imported everywhere else.
 settings = Settings()

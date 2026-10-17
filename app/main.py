@@ -1,5 +1,6 @@
 """The FastAPI application: startup/shutdown and the three endpoints."""
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -7,7 +8,8 @@ from datetime import datetime, timezone
 import aiomysql
 from fastapi import Depends, FastAPI, HTTPException
 
-from app import db
+from app import db, worker
+from app.config import settings
 from app.schemas import WebhookPayload
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -20,7 +22,20 @@ async def lifespan(app: FastAPI):
     await db.open_pool()
     await db.apply_schema()
     log.info("database ready")
+
+    worker_task = None
+    if settings.run_worker_in_api:
+        # The worker loop runs alongside the request handlers in the same event loop.
+        worker_task = asyncio.create_task(worker.run_worker())
+
     yield
+
+    if worker_task is not None:
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
     await db.close_pool()
     log.info("database pool closed")
 
