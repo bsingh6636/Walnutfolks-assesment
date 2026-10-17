@@ -36,7 +36,7 @@ async def open_pool() -> None:
         password=settings.db_password,
         db=settings.db_name,
         ssl=ssl_context,
-        minsize=1,
+        minsize=5,  # open every connection at startup, so no request pays for a TLS handshake
         maxsize=5,
         autocommit=True,  # each statement commits on its own unless we open a transaction
         cursorclass=aiomysql.DictCursor,  # rows come back as dicts: row["status"]
