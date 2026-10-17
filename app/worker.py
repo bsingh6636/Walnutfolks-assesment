@@ -109,11 +109,13 @@ async def record_failure(row_id: int, error: str) -> None:
 
 async def release_claims(row_ids: list[int]) -> None:
     """On shutdown, un-claim rows we were still working on so a restart picks them up at once."""
+    if not row_ids:
+        return
     async with db.pool.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 "UPDATE transactions SET claimed_at = NULL WHERE id IN %s AND status = 'PROCESSING'",
-                (row_ids,),
+                (tuple(row_ids),),
             )
 
 
@@ -145,7 +147,10 @@ async def run_worker() -> None:
         for task in in_flight:
             task.cancel()
         if in_flight:
-            await release_claims(list(in_flight.values()))
+            try:
+                await asyncio.shield(release_claims(list(in_flight.values())))
+            except Exception:
+                log.exception("failed to release claims on shutdown")
         log.info("worker stopped")
 
 

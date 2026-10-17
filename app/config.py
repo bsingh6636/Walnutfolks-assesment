@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     # Set to false for a local MySQL without certificates.
     db_ssl: bool = True
 
+    # Connection pool sizing & recycling (reconnect stale idle connections)
+    db_pool_minsize: int = 5
+    db_pool_maxsize: int = 15
+    db_pool_recycle_seconds: int = 300
+
     # The assessment requires a 30 second simulated delay per transaction.
     # Lower it locally to iterate faster.
     processing_delay_seconds: float = 30.0

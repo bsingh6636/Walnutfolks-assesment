@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 import aiomysql
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
 from app import db, worker
 from app.config import settings
@@ -41,6 +42,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Transaction Webhook Service", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def iso_z(value: datetime | None) -> str | None:

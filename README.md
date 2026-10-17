@@ -6,7 +6,7 @@ each transaction reliably in the background with a simulated 30 second delay.
 Duplicate webhooks for the same transaction are accepted but never processed
 twice.
 
-**Live endpoint:** _add the deployed URL here_
+**Live endpoint:** https://walnutfolks-assesment.brijeshhq.com
 
 ## API
 
@@ -19,14 +19,14 @@ twice.
 Health check:
 
 ```bash
-curl https://HOST/
+curl https://walnutfolks-assesment.brijeshhq.com/
 # {"status":"HEALTHY","current_time":"2026-10-17T07:18:19Z"}
 ```
 
 Send a webhook:
 
 ```bash
-curl -i -X POST https://HOST/v1/webhooks/transactions \
+curl -i -X POST https://walnutfolks-assesment.brijeshhq.com/v1/webhooks/transactions \
   -H "Content-Type: application/json" \
   -d '{"transaction_id":"txn_abc123def456","source_account":"acc_user_789","destination_account":"acc_merchant_456","amount":1500,"currency":"INR"}'
 # HTTP/1.1 202 Accepted
@@ -36,7 +36,7 @@ curl -i -X POST https://HOST/v1/webhooks/transactions \
 Check its status (`PROCESSING` first, `PROCESSED` about 30 seconds later):
 
 ```bash
-curl https://HOST/v1/transactions/txn_abc123def456
+curl https://walnutfolks-assesment.brijeshhq.com/v1/transactions/txn_abc123def456
 # [{"transaction_id":"txn_abc123def456","source_account":"acc_user_789",
 #   "destination_account":"acc_merchant_456","amount":1500.0,"currency":"INR",
 #   "status":"PROCESSED","created_at":"2026-10-17T07:13:44Z","processed_at":"2026-10-17T07:14:15Z"}]
@@ -137,6 +137,26 @@ retry-then-`FAILED`.
 
 To see the real 30 second behaviour, send a webhook with curl as shown above
 and query the transaction twice, 30 seconds apart.
+
+## Simulation & Load Testing (Production & Local)
+
+A comprehensive simulation CLI tool is available in `scripts/simulate.py`:
+
+```bash
+# Single transaction lifecycle (health -> webhook -> immediate query -> duplicate idempotency -> 30s completion wait):
+python scripts/simulate.py --mode single
+
+# Low volume test (10 transactions, 5 concurrent):
+python scripts/simulate.py --mode batch --count 10 --concurrency 5
+
+# High volume load test (40 transactions, 10 concurrent, 20% duplicate injection, wait for completion):
+python scripts/simulate.py --mode batch --count 40 --concurrency 10 --duplicates 20 --wait
+
+# Test a local deployment:
+python scripts/simulate.py --url http://127.0.0.1:8000 --mode single
+```
+
+It outputs throughput, p50/p90/p95/p99 latency distribution, SLA compliance (<500ms), and real-time background worker queue draining metrics.
 
 ## Technical choices
 
