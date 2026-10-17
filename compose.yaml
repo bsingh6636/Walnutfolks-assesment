@@ -1,0 +1,39 @@
+name: transaction-webhooks
+
+services:
+  api:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    # Nginx runs on the EC2 host. Only the host can reach the published port.
+    ports:
+      - "127.0.0.1:8000:8000"
+    # Exec form delivers shutdown signals to Uvicorn so worker claims release.
+    # Trust proxy headers only within this host-only deployment boundary.
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --proxy-headers
+      - --forwarded-allow-ips
+      - "*"
+    stop_grace_period: 45s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=3).close()"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
