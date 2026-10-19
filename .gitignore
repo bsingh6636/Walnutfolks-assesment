@@ -9,3 +9,6 @@ __pycache__/
 .pytest_cache/
 
 *.pdf
+
+# Stress test run reports
+scripts/stress/results/

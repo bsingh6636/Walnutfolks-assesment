@@ -21,15 +21,16 @@ Usage:
 
 import argparse
 import concurrent.futures
+import http.client
 import json
 import random
 import ssl
 import sys
+import threading
 import time
-import urllib.error
-import urllib.request
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 try:
     import certifi
@@ -38,6 +39,11 @@ except ImportError:
     SSL_CONTEXT = ssl.create_default_context()
     SSL_CONTEXT.check_hostname = False
     SSL_CONTEXT.verify_mode = ssl.CERT_NONE
+
+# One persistent socket per load-test thread; never share a connection between
+# concurrent requests. This avoids repeating TCP/TLS setup for every webhook.
+HTTP_CLIENT = threading.local()
+TRACE_HTTP = False
 
 
 def http_request(
@@ -50,27 +56,51 @@ def http_request(
     headers = {"Content-Type": "application/json"} if data else {}
     body_bytes = json.dumps(data).encode("utf-8") if data else None
 
-    req = urllib.request.Request(url, data=body_bytes, headers=headers, method=method)
     start = time.perf_counter()
-
     try:
-        with urllib.request.urlopen(req, context=SSL_CONTEXT, timeout=timeout) as resp:
-            duration_ms = (time.perf_counter() - start) * 1000.0
-            body = resp.read().decode("utf-8")
-            try:
-                res_json = json.loads(body)
-            except Exception:
-                res_json = body
-            return resp.status, res_json, duration_ms
-    except urllib.error.HTTPError as e:
+        target = urlsplit(url)
+        if target.scheme not in {"http", "https"} or not target.hostname:
+            raise ValueError("URL must use http:// or https:// with a hostname")
+        origin = (target.scheme, target.hostname, target.port)
+        conn = getattr(HTTP_CLIENT, "connection", None)
+        if conn is None or getattr(HTTP_CLIENT, "origin", None) != origin:
+            if conn is not None:
+                conn.close()
+            if target.scheme == "https":
+                conn = http.client.HTTPSConnection(
+                    target.hostname, target.port, timeout=timeout, context=SSL_CONTEXT,
+                )
+            else:
+                conn = http.client.HTTPConnection(target.hostname, target.port, timeout=timeout)
+            HTTP_CLIENT.connection = conn
+            HTTP_CLIENT.origin = origin
+        conn.timeout = timeout
+        reused = conn.sock is not None
+        if reused:
+            conn.sock.settimeout(timeout)
+        path = target.path or "/"
+        if target.query:
+            path += "?" + target.query
+        conn.request(method, path, body=body_bytes, headers=headers)
+        resp = conn.getresponse()
+        body = resp.read().decode("utf-8")
+        # Include receipt of the entire body, not just the response headers.
         duration_ms = (time.perf_counter() - start) * 1000.0
-        body = e.read().decode("utf-8")
+        if TRACE_HTTP:
+            print(f"  [timing] {method} {path} client_ms={duration_ms:.1f} "
+                  f"server_timing={resp.getheader('Server-Timing', 'unavailable')} "
+                  f"connection={'reused' if reused else 'new'} "
+                  f"request_id={resp.getheader('X-Request-ID', '-')}")
         try:
             res_json = json.loads(body)
-        except Exception:
+        except json.JSONDecodeError:
             res_json = body
-        return e.code, res_json, duration_ms
+        return resp.status, res_json, duration_ms
     except Exception as e:
+        conn = getattr(HTTP_CLIENT, "connection", None)
+        if conn is not None:
+            conn.close()
+            HTTP_CLIENT.connection = None
         duration_ms = (time.perf_counter() - start) * 1000.0
         return 0, str(e), duration_ms
 
@@ -102,6 +132,7 @@ def run_single(base_url: str, timeout: float = 120.0):
     payload = create_payload()
     txn_id = payload["transaction_id"]
     print(f"\n[Step 2] Sending transaction webhook (ID: {txn_id})...")
+    submitted_at = time.perf_counter()
     status, body, duration = http_request(f"{base_url}/v1/webhooks/transactions", method="POST", data=payload)
     print(f"  [HTTP {status}] Webhook acknowledged in {duration:.1f}ms (Target: <500ms)")
     print(f"  Response: {body}")
@@ -132,14 +163,14 @@ def run_single(base_url: str, timeout: float = 120.0):
 
     # 5. Wait for background processing (30s)
     print(f"\n[Step 5] Waiting for background worker to process (30s simulated delay)...")
-    start_time = time.time()
+    start_time = time.perf_counter()
     final_record = None
-    while time.time() - start_time < timeout:
-        time.sleep(3)
+    while time.perf_counter() - start_time < timeout:
+        time.sleep(min(1, max(0, timeout - (time.perf_counter() - start_time))))
         status, body, _ = http_request(f"{base_url}/v1/transactions/{txn_id}")
         if status == 200 and isinstance(body, list) and len(body) > 0:
             rec = body[0]
-            elapsed = time.time() - start_time
+            elapsed = time.perf_counter() - start_time
             print(f"  ... {elapsed:.1f}s elapsed: status = {rec.get('status')}")
             if rec.get("status") == "PROCESSED":
                 final_record = rec
@@ -149,13 +180,13 @@ def run_single(base_url: str, timeout: float = 120.0):
         print("\n" + "=" * 65)
         print(" [SUCCESS] Transaction completed background processing successfully!")
         print("=" * 65)
-        print(f"  Total processing time: {time.time() - start_time:.1f} seconds")
+        print(f"  Observed submit-to-completion time: {time.perf_counter() - submitted_at:.1f} seconds")
         print(f"  Original Amount preserved: {final_record.get('amount')} (not altered by duplicate)")
         print(f"  Created At:   {final_record.get('created_at')}")
         print(f"  Processed At: {final_record.get('processed_at')}")
         print(json.dumps(final_record, indent=2))
     else:
-        print("\n  [FAIL] Transaction did not transition to PROCESSED within 60s timeout.")
+        print(f"\n  [FAIL] Transaction did not transition to PROCESSED within {timeout:g}s timeout.")
         sys.exit(1)
 
 
@@ -290,7 +321,13 @@ def run_batch(base_url: str, count: int, concurrency: int, duplicate_percent: in
 
 
 def main():
+    global TRACE_HTTP
     parser = argparse.ArgumentParser(description="Transaction Webhook Simulation CLI")
+    parser.add_argument(
+        "--timings",
+        action="store_true",
+        help="Show client latency, server timing, HTTP connection reuse, and request IDs",
+    )
     parser.add_argument(
         "--url",
         default="https://walnutfolks-assesment.brijeshhq.com",
@@ -333,6 +370,7 @@ def main():
     )
 
     args = parser.parse_args()
+    TRACE_HTTP = args.timings
     base_url = args.url.rstrip("/")
 
     if args.mode == "single":

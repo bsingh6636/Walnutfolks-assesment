@@ -1,3 +1,4 @@
+import logging
 import time
 import uuid
 
@@ -24,6 +25,20 @@ def test_health_check(client):
     body = response.json()
     assert body["status"] == "HEALTHY"
     assert body["current_time"].endswith("Z")
+
+
+def test_request_timings_correlate_database_work(client, caplog):
+    with caplog.at_level(logging.INFO):
+        response = client.get("/v1/transactions/timing_missing")
+    assert response.status_code == 404
+    assert response.headers["Server-Timing"].startswith("app;dur=")
+    request_id = response.headers["X-Request-ID"]
+    messages = [record.getMessage() for record in caplog.records
+                if f"request_id={request_id}" in record.getMessage()]
+    assert any("operation=db.pool.acquire" in message for message in messages)
+    assert any("operation=sql.transaction.select" in message for message in messages)
+    assert any("operation=db.connection.held" in message for message in messages)
+    assert any("http method=GET" in message and "status=404" in message for message in messages)
 
 
 def test_webhook_is_accepted_quickly(client):
@@ -105,10 +120,10 @@ def test_failed_processing_is_retried_then_marked_failed(client, monkeypatch):
 
     real_external_api = worker.call_external_api
 
-    async def failing_external_api(row_id):
-        if row_id == doomed_row:
+    async def failing_external_api(row_ids):
+        if doomed_row in row_ids:
             raise RuntimeError("simulated payment processor timeout")
-        await real_external_api(row_id)
+        await real_external_api(row_ids)
 
     monkeypatch.setattr(worker, "call_external_api", failing_external_api)
 

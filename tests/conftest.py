@@ -55,9 +55,9 @@ def run_sql(query, args=()):
         conn.close()
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def client():
-    """One running app (pool + worker) shared by every test, with an empty table."""
+    """One running app per API test module, stopped before isolated worker tests."""
     with TestClient(app) as test_client:  # entering starts lifespan: pool, schema, worker
         run_sql("DELETE FROM transactions")
         yield test_client

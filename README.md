@@ -74,10 +74,17 @@ POST /v1/webhooks/transactions
 * **The table is the queue.** A row with status `PROCESSING` is a job waiting
   to be done. Nothing lives only in memory, so a restart or crash loses no
   transaction.
-* **Concurrency.** The worker keeps up to 10 transactions in their 30 second
-  delay at the same time. Claiming rows with `FOR UPDATE SKIP LOCKED` means
-  several worker processes can share the table without ever picking the same
-  row.
+* **Batches, not slots.** Each loop claims every due row (up to
+  `WORKER_BATCH_SIZE`) as one batch, waits the 30 seconds once for the batch,
+  then marks all of them with a single `UPDATE ... WHERE id IN (...)`. The loop
+  does not wait for a batch to finish before claiming the next, so rows that
+  arrive during a batch's wait start their own batch within a second. A burst
+  of 1,000 webhooks is therefore processed about 31 seconds after receipt and
+  costs the database one UPDATE, not 1,000. Claiming rows with
+  `FOR UPDATE SKIP LOCKED` means several worker processes can share the table
+  without ever picking the same row. A newly inserted webhook wakes the worker
+  in the same process immediately; polling remains as a fallback for retries,
+  restarts, and rows inserted by other API processes.
 * **Failures.** A failed attempt records the error, releases the row, and
   schedules a retry 30 seconds later. After 3 attempts the row is marked
   `FAILED`. A row claimed by a worker that died is reclaimed after 5 minutes.
@@ -110,9 +117,14 @@ Configuration is read from environment variables or `.env`:
 | ---------------------------- | ------- | ------------------------------------------------- |
 | `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | | MySQL connection |
 | `DB_SSL`                     | `true`  | Encrypt the connection (required by hosted MySQL) |
+| `DB_POOL_MINSIZE`            | `5`     | Connections opened at startup and kept ready     |
+| `DB_POOL_MAXSIZE`            | `30`    | Maximum pooled connections per process           |
+| `DB_POOL_RECYCLE_SECONDS`    | `300`   | Recycle a connection after this much idle time    |
+| `LOG_LEVEL`                 | `INFO`  | Use `DEBUG` to include idle worker pool timings   |
 | `PROCESSING_DELAY_SECONDS`   | `30`    | Simulated external call duration                  |
 | `RUN_WORKER_IN_API`          | `true`  | Run the worker inside the API process             |
-| `WORKER_CONCURRENCY`         | `10`    | Transactions processed at the same time           |
+| `WORKER_BATCH_SIZE`          | `1000`  | Most rows one claim takes; one wait and one UPDATE per batch |
+| `WORKER_POLL_INTERVAL_SECONDS` | `1`   | Fallback polling interval; local inserts wake immediately |
 | `WORKER_MAX_ATTEMPTS`        | `3`     | Attempts before a row is marked `FAILED`          |
 | `WORKER_RETRY_DELAY_SECONDS` | `30`    | Wait between attempts                             |
 | `WORKER_STALE_CLAIM_SECONDS` | `300`   | Reclaim rows held by a dead worker after this     |
@@ -157,6 +169,42 @@ python scripts/simulate.py --url http://127.0.0.1:8000 --mode single
 ```
 
 It outputs throughput, p50/p90/p95/p99 latency distribution, SLA compliance (<500ms), and real-time background worker queue draining metrics.
+
+To investigate latency, run:
+
+```bash
+python scripts/simulate.py --url http://127.0.0.1:8000 --mode single --timings
+```
+
+The simulator reuses an HTTP connection per thread and measures the entire
+response, including its body. `--timings` prints client latency, whether the
+socket was reused, the `Server-Timing` header, and `X-Request-ID`. The server
+header measures application time until response headers are ready; the client
+also measures network and body transfer time. The first request on each thread
+includes TCP/TLS setup. Single-mode completion is checked once per second, so
+the observed completion can lag the database update by a polling interval plus
+request time.
+
+Server logs use `elapsed_ms` and the same request ID for HTTP and database work:
+
+* `db.pool.open`: startup cost of establishing the initial MySQL connections.
+* `db.pool.acquire`: time borrowing a pooled connection, including any wait for
+  capacity or reconnect; `pool_size` and `pool_free` are snapshots before acquiring.
+* `db.connection.held`: time borrowed, with MySQL `connection_id` to track reuse.
+  Returning it to the pool leaves its socket open. No connection is borrowed
+  during the 30-second simulated external call.
+* `sql.webhook.insert`, `sql.transaction.select`, `sql.worker.complete` (one per batch): SQL timings.
+* `worker claimed`: batch claim duration and row age at selection. Row age uses
+  second-resolution `created_at`, so it is approximate and includes earlier
+  attempts on retries. `LOG_LEVEL=DEBUG` adds claim connection and empty-poll timings.
+* `worker.external_call`: actual simulated-call duration and configured delay.
+  `processing_ms` includes that call and the final status update after claiming.
+
+The assessment requires a 30-second simulated call. A 32-second gap between
+`created_at` and `processed_at` includes that delay plus queue/SQL overhead and
+timestamp rounding. Holding a connection for 45 seconds would consume a pool
+slot throughout the wait. Keep connections pooled between operations instead;
+the default idle recycle interval is 300 seconds.
 
 ## Technical choices
 

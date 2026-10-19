@@ -25,8 +25,11 @@ class Settings(BaseSettings):
 
     # Connection pool sizing & recycling (reconnect stale idle connections)
     db_pool_minsize: int = 5
-    db_pool_maxsize: int = 15
+    db_pool_maxsize: int = 30
     db_pool_recycle_seconds: int = 300
+
+    # DEBUG includes idle worker pool acquisition timings; INFO logs real work.
+    log_level: str = "INFO"
 
     # The assessment requires a 30 second simulated delay per transaction.
     # Lower it locally to iterate faster.
@@ -36,8 +39,9 @@ class Settings(BaseSettings):
     # Run the worker inside the API process. Set to false when running it
     # separately with `python -m app.worker`.
     run_worker_in_api: bool = True
-    # How many transactions may be in their 30 second delay at the same time.
-    worker_concurrency: int = 10
+    # Most rows one claim may take. Every due row up to this many becomes one
+    # batch: one shared 30 second wait, then one UPDATE for all of them.
+    worker_batch_size: int = 1000
     # How long to wait before looking for work again when nothing was found.
     worker_poll_interval_seconds: float = 1.0
     # Give up and mark FAILED after this many attempts.
